@@ -1,41 +1,57 @@
 # The World in One Picture — news-image-20261119
 
-A single-file Node.js program (`main.ts`) that draws a newspaper front page
-summing up the world news of **Thursday, 19 November 2026** into one
-1024×1024 PNG.
+[![make.fun · news-image-20261119](https://make.fun/badge/news-image-20261119.svg)](https://make.fun/bounty/news-image-20261119?utm_source=github&utm_medium=readme&utm_campaign=news-image-20261119)
+[![rank](https://make.fun/badge/news-image-20261119/maungzy86/news-image-20261119-entry/rank.svg)](https://make.fun/bounty/news-image-20261119/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=news-image-20261119)
+[![reward](https://make.fun/badge/news-image-20261119/maungzy86/news-image-20261119-entry/reward.svg)](https://make.fun/bounty/news-image-20261119?utm_source=github&utm_medium=readme&utm_campaign=news-image-20261119)
 
-## What is on the page
+This repository holds my entry for the make.fun bounty
+[news-image-20261119](https://make.fun/bounty/news-image-20261119) — "Sum up
+19 November's world news in one image".
 
-- Masthead: *The World in One Picture*, dated Thursday, 19 November 2026.
-- Lead story: Trump, Xi and Putin shake hands at the APEC summit in
-  Shenzhen, illustrated with the US, Chinese and Russian flags over a
-  three-way handshake drawn in code.
-- Secondary stories: the Crimean Bridge attack, the worldwide GTA VI
-  launch, Voyager 1 reaching one light-day from Earth, the ICJ judgment in
-  the Rohingya genocide case, and Cyclone Akvan's landfall in India.
-- Ticker: Hakeem Jeffries becomes the first Black Speaker of the US House;
-  the EU's 45-billion loan for Ukraine; a Van Gogh sells for a record
-  $190.4M; Finland seals its first permanent nuclear waste vault; Bank
-  Indonesia holds rates at 6%.
+The entry itself is a single Node program, `main.ts`, that paints an entire
+newspaper front page from code and saves it as a 1024×1024 PNG at
+`/output/entry.png`. Nothing is photographed, downloaded or traced: every
+letter, rule line, flag and illustration on the sheet is placed pixel by
+pixel by the program, so running it again always produces the same page.
 
-## How it works
+The sheet is dated **Thursday, 19 November 2026** and is built like a real
+front page. A bold masthead carries the title "The World in One Picture",
+a dark date band spells out the day in full, and the lead story covers the
+APEC summit in Shenzhen, where Trump, Xi and Putin shake hands — shown with
+the United States, Chinese and Russian flags above a three-way handshake
+drawn in code. Around that centrepiece sit the day's other big stories:
+another hit on the Crimean Bridge, the worldwide launch of GTA VI, Voyager 1
+crossing one light-day from Earth, the ICJ judgment in the Rohingya case,
+and Cyclone Akvan making landfall in India. A ticker strip along the bottom
+squeezes in the rest of the day — a new US House Speaker, an EU loan for
+Ukraine, a record Van Gogh sale, Finland's sealed nuclear waste vault and
+Bank Indonesia holding rates — so a single glance really does cover the
+planet's news for that Thursday.
 
-Everything is drawn from scratch with the Node.js standard library only:
+## How it is made
 
-- a hand-written PNG encoder (CRC-32 plus `node:zlib` deflate),
-- a small software rasteriser (rectangles, discs, lines, triangles,
-  starbursts) over an RGB pixel buffer,
-- a hand-drawn 5×7 bitmap font for all lettering.
+The program uses only the Node.js standard library. It ships its own PNG
+encoder (CRC-32 checksums plus `node:zlib` deflate), a tiny software
+rasteriser that draws rectangles, discs, lines and triangles into an RGB
+pixel buffer, and a hand-drawn 5×7 bitmap font for all of the lettering.
+There is no network access, no clock and no randomness involved, which is
+why two separate runs give byte-identical output files.
 
-No network, no clocks, no randomness: the output is deterministic, so two
-runs produce byte-identical files.
+## Running it
 
-## Run
+You need a recent Node.js that can run TypeScript files directly. From the
+root of this repository:
 
 ```sh
-node main.ts   # writes /output/entry.png (1024×1024)
+node main.ts
 ```
+
+That writes the finished front page to `/output/entry.png` (1024×1024) and
+prints the size of the file it produced. A pre-rendered copy of the result,
+`entry.png`, is kept in this repository so the page can be viewed without
+running anything.
 
 ## License
 
-MIT — see `LICENSE`.
+MIT — this entry is released under the MIT License; see the `LICENSE` file
+in this repository for the full text.
