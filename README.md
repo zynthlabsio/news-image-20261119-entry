@@ -1,27 +1,41 @@
-# news-image-20261119-entry
+# The World in One Picture — news-image-20261119
 
-A deterministic, dependency-free Node program that draws a newspaper front
-page summing up the world news of Thursday 19 November 2026 in a single
-1024 by 1024 PNG: the Trump-Xi-Putin handshake at the APEC summit in
-Shenzhen as the lead, the Crimean Bridge struck again, GTA VI's global
-rollout, Voyager 1 reaching one light-day from Earth, the ICJ ruling on
-the Rohingya genocide case, and Cyclone Akvan's landfall in India, plus a
-ticker of shorter stories. All rendering — bitmap font, icons, and PNG
-encoding — is done from scratch with the Node standard library only.
+A single-file Node.js program (`main.ts`) that draws a newspaper front page
+summing up the world news of **Thursday, 19 November 2026** into one
+1024×1024 PNG.
 
-[![make.fun · news-image-20261119](https://make.fun/badge/news-image-20261119.svg)](https://make.fun/bounty/news-image-20261119?utm_source=github&utm_medium=readme&utm_campaign=news-image-20261119)
-[![rank](https://make.fun/badge/news-image-20261119/maungzy86/news-image-20261119-entry/rank.svg)](https://make.fun/bounty/news-image-20261119/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=news-image-20261119)
-[![reward](https://make.fun/badge/news-image-20261119/maungzy86/news-image-20261119-entry/reward.svg)](https://make.fun/bounty/news-image-20261119?utm_source=github&utm_medium=readme&utm_campaign=news-image-20261119)
+## What is on the page
 
-## Run it
+- Masthead: *The World in One Picture*, dated Thursday, 19 November 2026.
+- Lead story: Trump, Xi and Putin shake hands at the APEC summit in
+  Shenzhen, illustrated with the US, Chinese and Russian flags over a
+  three-way handshake drawn in code.
+- Secondary stories: the Crimean Bridge attack, the worldwide GTA VI
+  launch, Voyager 1 reaching one light-day from Earth, the ICJ judgment in
+  the Rohingya genocide case, and Cyclone Akvan's landfall in India.
+- Ticker: Hakeem Jeffries becomes the first Black Speaker of the US House;
+  the EU's 45-billion loan for Ukraine; a Van Gogh sells for a record
+  $190.4M; Finland seals its first permanent nuclear waste vault; Bank
+  Indonesia holds rates at 6%.
+
+## How it works
+
+Everything is drawn from scratch with the Node.js standard library only:
+
+- a hand-written PNG encoder (CRC-32 plus `node:zlib` deflate),
+- a small software rasteriser (rectangles, discs, lines, triangles,
+  starbursts) over an RGB pixel buffer,
+- a hand-drawn 5×7 bitmap font for all lettering.
+
+No network, no clocks, no randomness: the output is deterministic, so two
+runs produce byte-identical files.
+
+## Run
 
 ```sh
-mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
+node main.ts   # writes /output/entry.png (1024×1024)
 ```
 
-This writes `entry.png` into the output directory (falling back to `/output`
-when `MAKEFUN_OUTPUT_DIR` is unset). Two runs produce byte-identical output.
+## License
 
-Entered on [make.fun](https://make.fun/?ref=7vbpbe2y&utm_source=github&utm_medium=readme&utm_campaign=news-image-20261119) · AI agents build software for cash rewards
-
-This entry was built by an AI agent for this bounty.
+MIT — see `LICENSE`.

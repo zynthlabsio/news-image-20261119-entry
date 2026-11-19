@@ -1,436 +1,636 @@
-// news-image-20261119 entry: "The World in One Picture"
-// A deterministic procedural newspaper front page for Thursday 19 Nov 2026.
-// Node 22, standard library only. The scene is drawn on a 2048x2048 canvas,
-// box-downsampled to 1024x1024 and written as entry.png into
-// MAKEFUN_OUTPUT_DIR (fallback /output). Two runs give identical bytes.
+// SPDX-License-Identifier: MIT
+//
+// "The World in One Picture" — a code-drawn newspaper front page that sums up
+// the world news of Thursday, 19 November 2026 in a single 1024x1024 image.
+//
+// Written from scratch using only the Node.js standard library:
+//   * a hand-rolled PNG encoder (CRC-32 + zlib deflate from node:zlib),
+//   * a tiny software rasteriser over an RGB pixel buffer,
+//   * a hand-drawn 5x7 bitmap font for every letter on the page.
+// The program is fully deterministic: no clocks, no randomness, no network.
+// Running it twice produces byte-identical output at /output/entry.png.
+
 import { deflateSync } from "node:zlib";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { writeFileSync, mkdirSync } from "node:fs";
 
-// ---------------- deterministic PRNG (mulberry32, fixed seed) ----------------
-function mulberry32(seed: number): () => number {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-const rand = mulberry32(20261119);
+// ---------------------------------------------------------------------------
+// CRC-32 (the PNG flavour: polynomial 0xEDB88320, reflected)
+// ---------------------------------------------------------------------------
 
-// ---------------- canvas ----------------
-type RGB = [number, number, number];
-const W = 2048;
-const H = 2048;
-const px = new Uint8Array(W * H * 3);
-
-const PAPER: RGB = [246, 241, 227];
-const INK: RGB = [26, 23, 18];
-const RED: RGB = [179, 53, 43];
-const NAVY: RGB = [31, 58, 95];
-const GOLD: RGB = [201, 150, 46];
-const TEAL: RGB = [29, 111, 106];
-const GREY: RGB = [107, 100, 85];
-const SKY: RGB = [214, 226, 235];
-const WHITE: RGB = [252, 251, 247];
-
-function put(x: number, y: number, c: RGB): void {
-  const xi = Math.round(x), yi = Math.round(y);
-  if (xi < 0 || yi < 0 || xi >= W || yi >= H) return;
-  const i = (yi * W + xi) * 3;
-  px[i] = c[0]; px[i + 1] = c[1]; px[i + 2] = c[2];
-}
-function rect(x: number, y: number, w: number, h: number, c: RGB): void {
-  for (let yy = Math.floor(y); yy < y + h; yy++)
-    for (let xx = Math.floor(x); xx < x + w; xx++) put(xx, yy, c);
-}
-function disc(cx: number, cy: number, r: number, c: RGB): void {
-  for (let yy = Math.floor(cy - r); yy <= cy + r; yy++)
-    for (let xx = Math.floor(cx - r); xx <= cx + r; xx++) {
-      const dx = xx - cx, dy = yy - cy;
-      if (dx * dx + dy * dy <= r * r) put(xx, yy, c);
-    }
-}
-function ringC(cx: number, cy: number, r: number, t: number, c: RGB): void {
-  for (let yy = Math.floor(cy - r - t); yy <= cy + r + t; yy++)
-    for (let xx = Math.floor(cx - r - t); xx <= cx + r + t; xx++) {
-      const d = Math.hypot(xx - cx, yy - cy);
-      if (Math.abs(d - r) <= t) put(xx, yy, c);
-    }
-}
-function seg(x0: number, y0: number, x1: number, y1: number, t: number, c: RGB): void {
-  const steps = Math.max(Math.ceil(Math.hypot(x1 - x0, y1 - y0)), 1);
-  for (let i = 0; i <= steps; i++)
-    disc(x0 + ((x1 - x0) * i) / steps, y0 + ((y1 - y0) * i) / steps, t, c);
-}
-function arc(cx: number, cy: number, r: number, a0: number, a1: number, t: number, c: RGB): void {
-  const steps = Math.max(Math.ceil(Math.abs(a1 - a0) * r), 4);
-  for (let i = 0; i <= steps; i++) {
-    const a = a0 + ((a1 - a0) * i) / steps;
-    disc(cx + r * Math.cos(a), cy + r * Math.sin(a), t, c);
-  }
-}
-function frame(x: number, y: number, w: number, h: number, t: number, c: RGB): void {
-  rect(x, y, w, t, c); rect(x, y + h - t, w, t, c);
-  rect(x, y, t, h, c); rect(x + w - t, y, t, h, c);
-}
-
-// ---------------- PNG encoder (from scratch, zlib for IDAT) ----------------
-const CRC_TABLE = (() => {
-  const table = new Int32Array(256);
+const CRC_TABLE: number[] = (() => {
+  const table: number[] = [];
   for (let n = 0; n < 256; n++) {
     let c = n;
-    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    table[n] = c;
+    for (let k = 0; k < 8; k++) {
+      c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    }
+    table.push(c >>> 0);
   }
   return table;
 })();
-function crc32(buf: Uint8Array): number {
-  let c = 0xffffffff;
-  for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
-  return (c ^ 0xffffffff) >>> 0;
-}
-function chunk(type: string, data: Uint8Array): Uint8Array {
-  const out = new Uint8Array(12 + data.length);
-  const dv = new DataView(out.buffer);
-  dv.setUint32(0, data.length);
-  for (let i = 0; i < 4; i++) out[4 + i] = type.charCodeAt(i);
-  out.set(data, 8);
-  const body = out.subarray(4, 8 + data.length);
-  dv.setUint32(8 + data.length, crc32(body));
-  return out;
-}
-function encodePNG(rgb: Uint8Array, w: number, h: number): Uint8Array {
-  const raw = new Uint8Array(h * (1 + w * 3));
-  for (let y = 0; y < h; y++) {
-    raw[y * (1 + w * 3)] = 0;
-    raw.set(rgb.subarray(y * w * 3, (y + 1) * w * 3), y * (1 + w * 3) + 1);
+
+function crc32(buf: Buffer): number {
+  let crc = 0xffffffff;
+  for (let i = 0; i < buf.length; i++) {
+    crc = CRC_TABLE[(crc ^ buf[i]) & 0xff] ^ (crc >>> 8);
   }
-  const ihdr = new Uint8Array(13);
-  const dv = new DataView(ihdr.buffer);
-  dv.setUint32(0, w); dv.setUint32(4, h);
-  ihdr[8] = 8; ihdr[9] = 2; // 8-bit, truecolor
-  const parts = [
-    new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
-    chunk("IHDR", ihdr),
-    chunk("IDAT", deflateSync(raw, { level: 9 })),
-    chunk("IEND", new Uint8Array(0)),
-  ];
-  const total = parts.reduce((n, p) => n + p.length, 0);
-  const out = new Uint8Array(total);
-  let off = 0;
-  for (const p of parts) { out.set(p, off); off += p.length; }
-  return out;
+  return (crc ^ 0xffffffff) >>> 0;
 }
-function downsample2x(src: Uint8Array, w: number, h: number): Uint8Array {
-  const ow = w / 2, oh = h / 2;
-  const out = new Uint8Array(ow * oh * 3);
-  for (let y = 0; y < oh; y++)
-    for (let x = 0; x < ow; x++)
-      for (let ch = 0; ch < 3; ch++) {
-        let s = 0;
-        for (let dy = 0; dy < 2; dy++)
-          for (let dx = 0; dx < 2; dx++)
-            s += src[((2 * y + dy) * w + (2 * x + dx)) * 3 + ch];
-        out[(y * ow + x) * 3 + ch] = Math.round(s / 4);
-      }
+
+// ---------------------------------------------------------------------------
+// Minimal PNG writer: 8-bit RGB, filter byte 0 per scanline, single IDAT.
+// ---------------------------------------------------------------------------
+
+function pngChunk(type: string, data: Buffer): Buffer {
+  const out = Buffer.alloc(12 + data.length);
+  out.writeUInt32BE(data.length, 0);
+  out.write(type, 4, "ascii");
+  data.copy(out, 8);
+  const crc = crc32(out.subarray(4, 8 + data.length));
+  out.writeUInt32BE(crc, 8 + data.length);
   return out;
 }
 
-// ---------------- 5x7 bitmap font ----------------
-// Each glyph: 7 rows of 5 bits, written as strings of "1"/"0".
-const FONT: Record<string, string[]> = {
-  A: ["01110", "10001", "10001", "11111", "10001", "10001", "10001"],
-  B: ["11110", "10001", "10001", "11110", "10001", "10001", "11110"],
-  C: ["01110", "10001", "10000", "10000", "10000", "10001", "01110"],
-  D: ["11100", "10010", "10001", "10001", "10001", "10010", "11100"],
-  E: ["11111", "10000", "10000", "11110", "10000", "10000", "11111"],
-  F: ["11111", "10000", "10000", "11110", "10000", "10000", "10000"],
-  G: ["01110", "10001", "10000", "10111", "10001", "10001", "01111"],
-  H: ["10001", "10001", "10001", "11111", "10001", "10001", "10001"],
-  I: ["01110", "00100", "00100", "00100", "00100", "00100", "01110"],
-  J: ["00111", "00010", "00010", "00010", "00010", "10010", "01100"],
-  K: ["10001", "10010", "10100", "11000", "10100", "10010", "10001"],
-  L: ["10000", "10000", "10000", "10000", "10000", "10000", "11111"],
-  M: ["10001", "11011", "10101", "10101", "10001", "10001", "10001"],
-  N: ["10001", "11001", "10101", "10011", "10001", "10001", "10001"],
-  O: ["01110", "10001", "10001", "10001", "10001", "10001", "01110"],
-  P: ["11110", "10001", "10001", "11110", "10000", "10000", "10000"],
-  Q: ["01110", "10001", "10001", "10001", "10101", "10010", "01101"],
-  R: ["11110", "10001", "10001", "11110", "10100", "10010", "10001"],
-  S: ["01111", "10000", "10000", "01110", "00001", "00001", "11110"],
-  T: ["11111", "00100", "00100", "00100", "00100", "00100", "00100"],
-  U: ["10001", "10001", "10001", "10001", "10001", "10001", "01110"],
-  V: ["10001", "10001", "10001", "10001", "10001", "01010", "00100"],
-  W: ["10001", "10001", "10001", "10101", "10101", "11011", "10001"],
-  X: ["10001", "01010", "00100", "00100", "00100", "01010", "10001"],
-  Y: ["10001", "01010", "00100", "00100", "00100", "00100", "00100"],
-  Z: ["11111", "00001", "00010", "00100", "01000", "10000", "11111"],
-  "0": ["01110", "10001", "10011", "10101", "11001", "10001", "01110"],
-  "1": ["00100", "01100", "00100", "00100", "00100", "00100", "01110"],
-  "2": ["01110", "10001", "00001", "00110", "01000", "10000", "11111"],
-  "3": ["11111", "00010", "00100", "00010", "00001", "10001", "01110"],
-  "4": ["00010", "00110", "01010", "10010", "11111", "00010", "00010"],
-  "5": ["11111", "10000", "11110", "00001", "00001", "10001", "01110"],
-  "6": ["00110", "01000", "10000", "11110", "10001", "10001", "01110"],
-  "7": ["11111", "00001", "00010", "00100", "01000", "01000", "01000"],
-  "8": ["01110", "10001", "10001", "01110", "10001", "10001", "01110"],
-  "9": ["01110", "10001", "10001", "01111", "00001", "00010", "01100"],
-  ".": ["00000", "00000", "00000", "00000", "00000", "01100", "01100"],
-  ",": ["00000", "00000", "00000", "00000", "01100", "00100", "01000"],
-  "'": ["00100", "00100", "01000", "00000", "00000", "00000", "00000"],
-  ":": ["00000", "01100", "01100", "00000", "01100", "01100", "00000"],
-  "!": ["00100", "00100", "00100", "00100", "00100", "00000", "00100"],
-  "?": ["01110", "10001", "00001", "00110", "00100", "00000", "00100"],
-  "-": ["00000", "00000", "00000", "01110", "00000", "00000", "00000"],
-  "/": ["00001", "00010", "00010", "00100", "01000", "01000", "10000"],
-  "$": ["00100", "01111", "10100", "01110", "00101", "11110", "00100"],
-  "%": ["11001", "11010", "00010", "00100", "01000", "01011", "10011"],
-  "(": ["00010", "00100", "01000", "01000", "01000", "00100", "00010"],
-  ")": ["01000", "00100", "00010", "00010", "00010", "00100", "01000"],
-  "+": ["00000", "00100", "00100", "01110", "00100", "00100", "00000"],
-};
-function textW(s: string, scale: number): number {
-  return s.length * 6 * scale - scale;
+function encodePng(width: number, height: number, rgb: Uint8Array): Buffer {
+  const signature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 2; // colour type 2 = truecolour RGB
+  ihdr[10] = 0; // compression
+  ihdr[11] = 0; // filter
+  ihdr[12] = 0; // no interlace
+
+  const stride = width * 3;
+  const raw = Buffer.alloc((stride + 1) * height);
+  for (let y = 0; y < height; y++) {
+    raw[y * (stride + 1)] = 0; // filter: none
+    raw.set(rgb.subarray(y * stride, (y + 1) * stride), y * (stride + 1) + 1);
+  }
+  const idat = deflateSync(raw, { level: 9 });
+
+  return Buffer.concat([
+    signature,
+    pngChunk("IHDR", ihdr),
+    pngChunk("IDAT", idat),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
 }
-function drawText(s: string, x: number, y: number, scale: number, c: RGB): void {
+
+// ---------------------------------------------------------------------------
+// Software raster canvas over a flat RGB buffer.
+// Colours are plain [r, g, b] triples so the whole page stays data-driven.
+// ---------------------------------------------------------------------------
+
+type Rgb = [number, number, number];
+
+const W = 1024;
+const H = 1024;
+
+class Canvas {
+  px: Uint8Array;
+
+  constructor() {
+    this.px = new Uint8Array(W * H * 3);
+  }
+
+  set(x: number, y: number, c: Rgb): void {
+    const xi = Math.round(x);
+    const yi = Math.round(y);
+    if (xi < 0 || yi < 0 || xi >= W || yi >= H) return;
+    const i = (yi * W + xi) * 3;
+    this.px[i] = c[0];
+    this.px[i + 1] = c[1];
+    this.px[i + 2] = c[2];
+  }
+
+  fillAll(c: Rgb): void {
+    for (let i = 0; i < this.px.length; i += 3) {
+      this.px[i] = c[0];
+      this.px[i + 1] = c[1];
+      this.px[i + 2] = c[2];
+    }
+  }
+
+  rect(x: number, y: number, w: number, h: number, c: Rgb): void {
+    for (let yy = Math.round(y); yy < Math.round(y + h); yy++) {
+      for (let xx = Math.round(x); xx < Math.round(x + w); xx++) {
+        this.set(xx, yy, c);
+      }
+    }
+  }
+
+  frame(x: number, y: number, w: number, h: number, t: number, c: Rgb): void {
+    this.rect(x, y, w, t, c);
+    this.rect(x, y + h - t, w, t, c);
+    this.rect(x, y, t, h, c);
+    this.rect(x + w - t, y, t, h, c);
+  }
+
+  // Thick line by stamping discs along the segment (Bresenham-free, simple).
+  line(x0: number, y0: number, x1: number, y1: number, t: number, c: Rgb): void {
+    const steps = Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0), 1);
+    for (let s = 0; s <= steps; s++) {
+      const x = x0 + ((x1 - x0) * s) / steps;
+      const y = y0 + ((y1 - y0) * s) / steps;
+      this.disc(x, y, t / 2, c);
+    }
+  }
+
+  disc(cx: number, cy: number, r: number, c: Rgb): void {
+    const r2 = r * r;
+    for (let yy = Math.floor(cy - r); yy <= Math.ceil(cy + r); yy++) {
+      for (let xx = Math.floor(cx - r); xx <= Math.ceil(cx + r); xx++) {
+        const dx = xx - cx;
+        const dy = yy - cy;
+        if (dx * dx + dy * dy <= r2) this.set(xx, yy, c);
+      }
+    }
+  }
+
+  ring(cx: number, cy: number, r: number, t: number, c: Rgb): void {
+    const outer = r + t / 2;
+    const inner = r - t / 2;
+    for (let yy = Math.floor(cy - outer); yy <= Math.ceil(cy + outer); yy++) {
+      for (let xx = Math.floor(cx - outer); xx <= Math.ceil(cx + outer); xx++) {
+        const d = Math.hypot(xx - cx, yy - cy);
+        if (d >= inner && d <= outer) this.set(xx, yy, c);
+      }
+    }
+  }
+
+  // Filled triangle via barycentric sign tests.
+  tri(
+    x0: number, y0: number,
+    x1: number, y1: number,
+    x2: number, y2: number,
+    c: Rgb,
+  ): void {
+    const minX = Math.floor(Math.min(x0, x1, x2));
+    const maxX = Math.ceil(Math.max(x0, x1, x2));
+    const minY = Math.floor(Math.min(y0, y1, y2));
+    const maxY = Math.ceil(Math.max(y0, y1, y2));
+    const sign = (ax: number, ay: number, bx: number, by: number, px: number, py: number) =>
+      (px - bx) * (ay - by) - (ax - bx) * (py - by);
+    for (let y = minY; y <= maxY; y++) {
+      for (let x = minX; x <= maxX; x++) {
+        const d0 = sign(x0, y0, x1, y1, x, y);
+        const d1 = sign(x1, y1, x2, y2, x, y);
+        const d2 = sign(x2, y2, x0, y0, x, y);
+        const neg = d0 < 0 || d1 < 0 || d2 < 0;
+        const pos = d0 > 0 || d1 > 0 || d2 > 0;
+        if (!(neg && pos)) this.set(x, y, c);
+      }
+    }
+  }
+
+  // Filled convex polygon from a list of [x, y] points (fan triangulation).
+  poly(points: Array<[number, number]>, c: Rgb): void {
+    for (let i = 1; i + 1 < points.length; i++) {
+      this.tri(
+        points[0][0], points[0][1],
+        points[i][0], points[i][1],
+        points[i + 1][0], points[i + 1][1],
+        c,
+      );
+    }
+  }
+
+  // Eight-point starburst (explosions, sun, sparkle) around a centre.
+  burst(cx: number, cy: number, rOuter: number, rInner: number, c: Rgb): void {
+    const pts: Array<[number, number]> = [];
+    for (let i = 0; i < 16; i++) {
+      const ang = (Math.PI / 8) * i - Math.PI / 2;
+      const r = i % 2 === 0 ? rOuter : rInner;
+      pts.push([cx + Math.cos(ang) * r, cy + Math.sin(ang) * r]);
+    }
+    // Draw as triangles from the centre so the star is one solid shape.
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[i];
+      const b = pts[(i + 1) % pts.length];
+      this.tri(cx, cy, a[0], a[1], b[0], b[1], c);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Hand-drawn 5x7 bitmap font. Each glyph is 7 strings of 5 characters;
+// '#' marks a filled cell. Only the characters the page needs are included.
+// ---------------------------------------------------------------------------
+
+const GLYPHS: Record<string, string[]> = {
+  A: [".###.", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"],
+  B: ["####.", "#...#", "#...#", "####.", "#...#", "#...#", "####."],
+  C: [".####", "#....", "#....", "#....", "#....", "#....", ".####"],
+  D: ["####.", "#...#", "#...#", "#...#", "#...#", "#...#", "####."],
+  E: ["#####", "#....", "#....", "####.", "#....", "#....", "#####"],
+  F: ["#####", "#....", "#....", "####.", "#....", "#....", "#...."],
+  G: [".####", "#....", "#....", "#.###", "#...#", "#...#", ".###."],
+  H: ["#...#", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"],
+  I: ["#####", "..#..", "..#..", "..#..", "..#..", "..#..", "#####"],
+  J: ["..###", "...#.", "...#.", "...#.", "...#.", "#..#.", ".##.."],
+  K: ["#...#", "#..#.", "#.#..", "##...", "#.#..", "#..#.", "#...#"],
+  L: ["#....", "#....", "#....", "#....", "#....", "#....", "#####"],
+  M: ["#...#", "##.##", "#.#.#", "#.#.#", "#...#", "#...#", "#...#"],
+  N: ["#...#", "##..#", "#.#.#", "#..##", "#...#", "#...#", "#...#"],
+  O: [".###.", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."],
+  P: ["####.", "#...#", "#...#", "####.", "#....", "#....", "#...."],
+  Q: [".###.", "#...#", "#...#", "#...#", "#.#.#", "#..#.", ".##.#"],
+  R: ["####.", "#...#", "#...#", "####.", "#.#..", "#..#.", "#...#"],
+  S: [".####", "#....", "#....", ".###.", "....#", "....#", "####."],
+  T: ["#####", "..#..", "..#..", "..#..", "..#..", "..#..", "..#.."],
+  U: ["#...#", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."],
+  V: ["#...#", "#...#", "#...#", "#...#", "#...#", ".#.#.", "..#.."],
+  W: ["#...#", "#...#", "#...#", "#.#.#", "#.#.#", "##.##", "#...#"],
+  X: ["#...#", ".#.#.", "..#..", "..#..", "..#..", ".#.#.", "#...#"],
+  Y: ["#...#", "#...#", ".#.#.", "..#..", "..#..", "..#..", "..#.."],
+  Z: ["#####", "....#", "...#.", "..#..", ".#...", "#....", "#####"],
+  "0": [".###.", "#..##", "#.#.#", "##..#", "#...#", "#...#", ".###."],
+  "1": ["..#..", ".##..", "..#..", "..#..", "..#..", "..#..", "#####"],
+  "2": [".###.", "#...#", "....#", "...#.", "..#..", ".#...", "#####"],
+  "3": ["####.", "....#", "....#", ".###.", "....#", "....#", "####."],
+  "4": ["...#.", "..##.", ".#.#.", "#..#.", "#####", "...#.", "...#."],
+  "5": ["#####", "#....", "####.", "....#", "....#", "#...#", ".###."],
+  "6": [".###.", "#....", "#....", "####.", "#...#", "#...#", ".###."],
+  "7": ["#####", "....#", "...#.", "..#..", "..#..", "..#..", "..#.."],
+  "8": [".###.", "#...#", "#...#", ".###.", "#...#", "#...#", ".###."],
+  "9": [".###.", "#...#", "#...#", ".####", "....#", "....#", ".###."],
+  " ": [".....", ".....", ".....", ".....", ".....", ".....", "....."],
+  ".": [".....", ".....", ".....", ".....", ".....", ".##..", ".##.."],
+  ",": [".....", ".....", ".....", ".....", ".##..", ".##..", ".#..."],
+  "'": ["..#..", "..#..", "..#..", ".....", ".....", ".....", "....."],
+  "-": [".....", ".....", ".....", "#####", ".....", ".....", "....."],
+  ":": [".....", ".##..", ".##..", ".....", ".##..", ".##..", "....."],
+  ";": [".....", ".##..", ".##..", ".....", ".##..", ".##..", ".#..."],
+  "=": [".....", ".....", "#####", ".....", "#####", ".....", "....."],
+  "!": ["..#..", "..#..", "..#..", "..#..", "..#..", ".....", "..#.."],
+  "?": [".###.", "#...#", "....#", "...#.", "..#..", ".....", "..#.."],
+  "$": ["..#..", ".####", "#.#..", ".###.", "..#.#", "####.", "..#.."],
+  "%": ["##..#", "##.#.", "....#", "...#.", "..#..", ".#...", "#..##"],
+  "/": ["....#", "....#", "...#.", "..#..", ".#...", "#....", "#...."],
+  "+": [".....", "..#..", "..#..", "#####", "..#..", "..#..", "....."],
+  "(": ["...##", "..#..", ".#...", ".#...", ".#...", "..#..", "...##"],
+  ")": ["##...", "..#..", "...#.", "...#.", "...#.", "..#..", "##..."],
+  "&": [".##..", "#..#.", "#.#..", ".#...", "#.#.#", "#..#.", ".##.#"],
+  "•": [".....", ".....", ".###.", ".###.", ".###.", ".....", "....."],
+};
+
+// Text metrics: at scale s each glyph cell is s pixels, glyphs advance
+// 6*s horizontally (5 wide + 1 gap) and lines advance 9*s vertically.
+function textWidth(text: string, scale: number): number {
+  if (text.length === 0) return 0;
+  return text.length * 6 * scale - scale;
+}
+
+function drawText(
+  cv: Canvas,
+  x: number,
+  y: number,
+  text: string,
+  scale: number,
+  colour: Rgb,
+): void {
+  const upper = text.toUpperCase();
   let cx = x;
-  for (const chRaw of s) {
-    const ch = chRaw.toUpperCase();
-    const glyph = FONT[ch];
-    if (glyph) {
-      for (let row = 0; row < 7; row++)
-        for (let col = 0; col < 5; col++)
-          if (glyph[row][col] === "1")
-            rect(cx + col * scale, y + row * scale, scale, scale, c);
+  for (const ch of upper) {
+    const glyph = GLYPHS[ch] ?? GLYPHS["?"];
+    for (let row = 0; row < 7; row++) {
+      for (let col = 0; col < 5; col++) {
+        if (glyph[row][col] === "#") {
+          cv.rect(cx + col * scale, y + row * scale, scale, scale, colour);
+        }
+      }
     }
     cx += 6 * scale;
   }
 }
-function drawTextC(s: string, cx: number, y: number, scale: number, c: RGB): void {
-  drawText(s, cx - textW(s, scale) / 2, y, scale, c);
+
+function drawTextCentred(
+  cv: Canvas,
+  centreX: number,
+  y: number,
+  text: string,
+  scale: number,
+  colour: Rgb,
+): void {
+  drawText(cv, Math.round(centreX - textWidth(text, scale) / 2), y, text, scale, colour);
 }
-function wrap(s: string, maxChars: number): string[] {
-  const words = s.split(" ");
+
+// Greedy word wrap: returns lines that each fit within maxWidth pixels.
+function wrapText(text: string, scale: number, maxWidth: number): string[] {
+  const words = text.toUpperCase().split(" ");
   const lines: string[] = [];
-  let cur = "";
-  for (const w of words) {
-    if (cur === "") cur = w;
-    else if ((cur + " " + w).length <= maxChars) cur += " " + w;
-    else { lines.push(cur); cur = w; }
+  let current = "";
+  for (const word of words) {
+    const candidate = current === "" ? word : current + " " + word;
+    if (textWidth(candidate, scale) <= maxWidth || current === "") {
+      current = candidate;
+    } else {
+      lines.push(current);
+      current = word;
+    }
   }
-  if (cur) lines.push(cur);
+  if (current !== "") lines.push(current);
   return lines;
 }
-function drawPara(s: string, x: number, y: number, scale: number, c: RGB, maxChars: number, lineGap: number): number {
-  const lines = wrap(s, maxChars);
-  lines.forEach((ln, i) => drawText(ln, x, y + i * (7 * scale + lineGap), scale, c));
-  return y + lines.length * (7 * scale + lineGap);
+
+function drawWrapped(
+  cv: Canvas,
+  x: number,
+  y: number,
+  text: string,
+  scale: number,
+  colour: Rgb,
+  maxWidth: number,
+  lineGap = 9 * scale,
+): number {
+  const lines = wrapText(text, scale, maxWidth);
+  lines.forEach((line, i) => drawText(cv, x, y + i * lineGap, line, scale, colour));
+  return y + lines.length * lineGap;
 }
 
-// ---------------- icons ----------------
-function flagUS(x: number, y: number, w: number, h: number): void {
-  const stripe = h / 7;
-  for (let i = 0; i < 7; i++) rect(x, y + i * stripe, w, stripe + 1, i % 2 === 0 ? RED : WHITE);
-  rect(x, y, w * 0.45, stripe * 4, NAVY);
-  for (let r = 0; r < 4; r++)
-    for (let s = 0; s < 5; s++) disc(x + 18 + s * (w * 0.45 - 30) / 4, y + 14 + r * (stripe * 4 - 26) / 3, 5, WHITE);
-  frame(x, y, w, h, 4, INK);
-}
-function flagCN(x: number, y: number, w: number, h: number): void {
-  rect(x, y, w, h, [222, 41, 45]);
-  const star = (cx: number, cy: number, r: number) => {
-    disc(cx, cy, r, GOLD);
-    disc(cx, cy - r, r * 0.38, GOLD); disc(cx, cy + r, r * 0.38, GOLD);
-    disc(cx - r, cy, r * 0.38, GOLD); disc(cx + r, cy, r * 0.38, GOLD);
-  };
-  star(x + w * 0.16, y + h * 0.26, 17);
-  star(x + w * 0.30, y + h * 0.13, 8); star(x + w * 0.34, y + h * 0.28, 8);
-  star(x + w * 0.34, y + h * 0.44, 8); star(x + w * 0.29, y + h * 0.57, 8);
-  frame(x, y, w, h, 4, INK);
-}
-function flagRU(x: number, y: number, w: number, h: number): void {
-  rect(x, y, w, h / 3 + 1, WHITE);
-  rect(x, y + h / 3, w, h / 3 + 1, [30, 80, 180]);
-  rect(x, y + (2 * h) / 3, w, h / 3 + 1, [215, 40, 40]);
-  frame(x, y, w, h, 4, INK);
-}
-function burst(cx: number, cy: number, r: number, c: RGB): void {
-  for (let i = 0; i < 12; i++) {
-    const a = (i / 12) * Math.PI * 2;
-    const r2 = r * (i % 2 === 0 ? 1 : 0.55);
-    seg(cx, cy, cx + r2 * Math.cos(a), cy + r2 * Math.sin(a), 7, c);
+// ---------------------------------------------------------------------------
+// Palette: warm newsprint paper, near-black ink, and a restrained set of
+// accent colours reused across the page so the sheet reads as one design.
+// ---------------------------------------------------------------------------
+
+const PAPER: Rgb = [246, 241, 227];
+const PAPER_SHADE: Rgb = [236, 228, 205];
+const INK: Rgb = [32, 34, 40];
+const INK_SOFT: Rgb = [84, 86, 92];
+const RED: Rgb = [178, 34, 42];
+const NAVY: Rgb = [31, 58, 95];
+const NAVY_DARK: Rgb = [18, 32, 54];
+const GOLD: Rgb = [214, 158, 44];
+const SKY: Rgb = [168, 205, 230];
+const WHITE: Rgb = [252, 252, 250];
+
+// ---------------------------------------------------------------------------
+// Illustrations. Everything is flat shapes: flags, a three-way handshake,
+// and one small spot icon per secondary story.
+// ---------------------------------------------------------------------------
+
+// United States: seven stripes plus a blue canton dotted with stars.
+function flagUsa(cv: Canvas, x: number, y: number, w: number, h: number): void {
+  const stripeH = h / 7;
+  for (let i = 0; i < 7; i++) {
+    cv.rect(x, y + i * stripeH, w, stripeH + 1, i % 2 === 0 ? RED : WHITE);
   }
-  disc(cx, cy, r * 0.3, c);
-}
-function iconBridge(x: number, y: number, w: number, h: number): void {
-  const deckY = y + h * 0.62;
-  rect(x + 8, deckY, w - 16, 14, INK);
-  for (const fx of [0.3, 0.7]) {
-    const tx = x + w * fx;
-    rect(tx - 9, y + h * 0.18, 18, deckY - y - h * 0.18, INK);
-    arc(tx, deckY - 4, w * 0.21, Math.PI * 1.08, Math.PI * 1.92, 5, INK);
+  const cantonW = w * 0.44;
+  const cantonH = stripeH * 4;
+  cv.rect(x, y, cantonW, cantonH, NAVY);
+  for (let r = 0; r < 4; r++) {
+    for (let s = 0; s < 5; s++) {
+      cv.disc(x + 12 + s * ((cantonW - 20) / 4), y + 10 + r * ((cantonH - 18) / 3), 3.2, WHITE);
+    }
   }
-  for (let i = 0; i < 5; i++) {
-    const wx = x + 14 + i * ((w - 40) / 4);
-    arc(wx, y + h * 0.86, 16, Math.PI, Math.PI * 2, 4, NAVY);
-  }
-  burst(x + w * 0.52, y + h * 0.3, 52, RED);
-  disc(x + w * 0.52, y + h * 0.3, 16, GOLD);
-}
-function iconGTA(x: number, y: number, w: number, h: number): void {
-  const sx = x + w * 0.3, sy = y + h * 0.3;
-  disc(sx, sy, 44, GOLD);
-  for (let i = 0; i < 8; i++) {
-    const a = (i / 8) * Math.PI * 2 + 0.4;
-    seg(sx + 54 * Math.cos(a), sy + 54 * Math.sin(a), sx + 72 * Math.cos(a), sy + 72 * Math.sin(a), 5, GOLD);
-  }
-  const tx = x + w * 0.68;
-  seg(tx, y + h * 0.85, tx + 14, y + h * 0.3, 10, [94, 64, 40]);
-  for (let i = 0; i < 6; i++) {
-    const a = Math.PI * (0.95 + i * 0.22);
-    arc(tx + 14, y + h * 0.3, 62, a, a + 0.5, 7, TEAL);
-  }
-  const gx = x + w * 0.5, gy = y + h * 0.78;
-  rect(gx - 78, gy - 34, 156, 68, INK);
-  disc(gx - 78, gy, 34, INK); disc(gx + 78, gy, 34, INK);
-  rect(gx - 58, gy - 6, 34, 12, WHITE); rect(gx - 47, gy - 17, 12, 34, WHITE);
-  disc(gx + 42, gy - 10, 9, RED); disc(gx + 62, gy + 8, 9, GOLD);
-}
-function iconVoyager(x: number, y: number, w: number, h: number): void {
-  const cx = x + w * 0.34, cy = y + h * 0.44;
-  arc(cx, cy, 74, Math.PI * 0.6, Math.PI * 1.65, 8, INK);
-  seg(cx, cy, cx + 66, cy + 40, 7, INK);
-  rect(cx + 58, cy + 30, 52, 30, GREY);
-  seg(cx + 84, cy + 30, cx + 150, cy - 66, 5, INK);
-  disc(cx + 152, cy - 68, 8, RED);
-  const ex = x + w * 0.85, ey = y + h * 0.68;
-  disc(ex, ey, 30, NAVY);
-  arc(ex - 8, ey - 6, 20, Math.PI * 0.2, Math.PI * 0.9, 6, TEAL);
-  for (let i = 1; i <= 6; i++) {
-    const t = i / 7;
-    disc(cx + 90 + (ex - cx - 120) * t, cy + 44 + (ey - cy - 44) * t, 4, GOLD);
-  }
-  for (let i = 0; i < 14; i++) disc(x + rand() * w, y + rand() * h * 0.5, 3, INK);
-}
-function iconScales(x: number, y: number, w: number, h: number): void {
-  const cx = x + w / 2, top = y + h * 0.16;
-  seg(cx, top, cx, y + h * 0.82, 8, INK);
-  seg(cx - w * 0.32, top + 16, cx + w * 0.32, top + 16, 7, INK);
-  disc(cx, top, 12, GOLD);
-  for (const s of [-1, 1]) {
-    const pxm = cx + s * w * 0.32;
-    seg(pxm, top + 16, pxm - 34, y + h * 0.52, 4, INK);
-    seg(pxm, top + 16, pxm + 34, y + h * 0.52, 4, INK);
-    arc(pxm, y + h * 0.47, 40, Math.PI * 0.05, Math.PI * 0.95, 7, NAVY);
-  }
-  rect(cx - 52, y + h * 0.82, 104, 12, INK);
-}
-function iconCyclone(x: number, y: number, w: number, h: number): void {
-  const cx = x + w / 2, cy = y + h * 0.44;
-  for (let k = 0; k < 3; k++) {
-    const r = 26 + k * 30;
-    arc(cx, cy, r, k * 1.1, k * 1.1 + Math.PI * 1.35, 9, TEAL);
-    arc(cx, cy, r, k * 1.1 + Math.PI, k * 1.1 + Math.PI * 2.35, 9, NAVY);
-  }
-  disc(cx, cy, 13, INK);
-  for (let i = 0; i < 5; i++) {
-    const rx = x + 20 + i * ((w - 50) / 4);
-    seg(rx, y + h * 0.78, rx - 12, y + h * 0.92, 4, NAVY);
-  }
+  cv.frame(x, y, w, h, 2, INK);
 }
 
-// ---------------- composition: one front page for 19 Nov 2026 ----------------
-rect(0, 0, W, H, PAPER);
-frame(28, 28, W - 56, H - 56, 6, INK);
-frame(44, 44, W - 88, H - 88, 2, INK);
-
-// Masthead
-drawTextC("THE DAILY FRONT PAGE - DRAWN BY A PROGRAM", W / 2, 66, 5, RED);
-drawTextC("THE WORLD IN ONE PICTURE", W / 2, 112, 13, INK);
-drawTextC("THURSDAY 19 NOVEMBER 2026", W / 2, 228, 9, NAVY);
-rect(90, 302, W - 180, 6, INK);
-rect(90, 316, W - 180, 2, INK);
-
-// Lead story: APEC Shenzhen - Trump, Xi and Putin meet
-{
-  const x = 90, y = 340, w = W - 180, h = 560;
-  rect(x, y, w, h, [233, 236, 238]);
-  frame(x, y, w, h, 5, INK);
-  drawText("APEC 2026 - SHENZHEN, CHINA", x + 36, y + 26, 5, RED);
-  const fw = 380, fh = 190, gap = 60;
-  const fx = (W - (3 * fw + 2 * gap)) / 2, fy = y + 78;
-  flagUS(fx, fy, fw, fh);
-  flagCN(fx + fw + gap, fy, fw, fh);
-  flagRU(fx + 2 * (fw + gap), fy, fw, fh);
-  drawTextC("UNITED STATES", fx + fw / 2, fy + fh + 12, 5, INK);
-  drawTextC("CHINA", fx + fw + gap + fw / 2, fy + fh + 12, 5, INK);
-  drawTextC("RUSSIA", fx + 2 * (fw + gap) + fw / 2, fy + fh + 12, 5, INK);
-  drawTextC("SHENZHEN HANDSHAKE", W / 2, y + 330, 14, INK);
-  drawTextC("TRUMP, XI AND PUTIN MEET AT APEC", W / 2, y + 440, 8, NAVY);
-  drawTextC("THREE LEADERS TOGETHER AS THE APEC SUMMIT CLOSES IN CHINA", W / 2, y + 508, 5, GREY);
-}
-
-// Middle row: Crimean Bridge + GTA VI
-{
-  const y = 920, h = 500;
-  const panels: Array<{ x: number; w: number }> = [
-    { x: 90, w: 904 }, { x: 1054, w: 904 },
+// China: red field, one large star and four small stars in the corner.
+function flagChina(cv: Canvas, x: number, y: number, w: number, h: number): void {
+  cv.rect(x, y, w, h, [222, 41, 36]);
+  cv.burst(x + 34, y + 32, 17, 7, GOLD);
+  const small: Array<[number, number]> = [
+    [64, 16], [74, 34], [74, 54], [62, 70],
   ];
-  // Left: Crimean Bridge attacked again
-  {
-    const { x, w } = panels[0];
-    rect(x, y, w, h, WHITE); frame(x, y, w, h, 5, INK);
-    iconBridge(x + 40, y + 24, w - 80, 200);
-    drawPara("CRIMEAN BRIDGE HIT AGAIN", x + 50, y + 248, 9, INK, 14, 10);
-    drawPara("UKRAINE HITS THE KERCH BRIDGE LINK TO CRIMEA", x + 50, y + 396, 5, GREY, 26, 8);
-  }
-  // Right: GTA VI global rollout
-  {
-    const { x, w } = panels[1];
-    rect(x, y, w, h, [250, 244, 230]); frame(x, y, w, h, 5, INK);
-    iconGTA(x + 40, y + 24, w - 80, 200);
-    drawTextC("VICE CITY OPENS", x + w / 2, y + 240, 9, INK);
-    drawTextC("GTA VI ROLLS OUT WORLDWIDE", x + w / 2, y + 322, 5, NAVY);
-    drawPara("13-YEAR WAIT ENDS: QUEUES AT MIDNIGHT LAUNCHES", x + 50, y + 378, 5, GREY, 26, 8);
-  }
+  for (const [sx, sy] of small) cv.burst(x + sx, y + sy, 8, 3.4, GOLD);
+  cv.frame(x, y, w, h, 2, INK);
 }
 
-// Bottom row: Voyager 1, ICJ ruling, Cyclone Akvan
-{
-  const y = 1440, h = 420;
-  const items: Array<{
-    x: number; icon: (x: number, y: number, w: number, h: number) => void;
-    head: string; cap: string;
-  }> = [
-    { x: 90, icon: iconVoyager, head: "VOYAGER 1 REACHES ONE LIGHT-DAY", cap: "NASA PROBE A FULL DAY OF LIGHT FROM EARTH" },
-    { x: 729, icon: iconScales, head: "THE HAGUE RULES ON ROHINGYA CASE", cap: "WORLD COURT DECIDES MYANMAR GENOCIDE CASE" },
-    { x: 1368, icon: iconCyclone, head: "CYCLONE AKVAN COMES ASHORE", cap: "STORM CROSSES INDIA'S EAST COAST" },
+// Russia: white / blue / red horizontal tricolour.
+function flagRussia(cv: Canvas, x: number, y: number, w: number, h: number): void {
+  const third = h / 3;
+  cv.rect(x, y, w, third + 1, WHITE);
+  cv.rect(x, y + third, w, third + 1, [0, 57, 166]);
+  cv.rect(x, y + third * 2, w, third + 1, [213, 43, 30]);
+  cv.frame(x, y, w, h, 2, INK);
+}
+
+// Three suited forearms converging on one clasped-hands knot in the middle,
+// each sleeve tinted after its flag, with white cuffs and a gold burst
+// behind the grip to mark the moment.
+function handshake(cv: Canvas, cx: number, cy: number): void {
+  cv.burst(cx, cy, 72, 34, GOLD);
+  cv.disc(cx, cy, 40, PAPER);
+
+  const sleeves: Array<{ from: [number, number]; cuff: Rgb; thick: number }> = [
+    { from: [cx - 176, cy + 56], cuff: NAVY, thick: 44 },        // left, US navy
+    { from: [cx + 176, cy + 56], cuff: [150, 26, 30], thick: 44 }, // right, red
+    { from: [cx, cy + 64], cuff: [40, 40, 46], thick: 30 },      // below, charcoal
   ];
-  for (const it of items) {
-    const w = 589;
-    rect(it.x, y, w, h, WHITE); frame(it.x, y, w, h, 5, INK);
-    it.icon(it.x + 30, y + 16, w - 60, 140);
-    drawPara(it.head, it.x + 36, y + 168, 6, INK, 13, 6);
-    drawPara(it.cap, it.x + 36, y + 324, 4, GREY, 21, 5);
+  for (const s of sleeves) {
+    const [fx, fy] = s.from;
+    // Sleeve: one thick stroke from the edge of the panel to the clasp.
+    cv.line(fx, fy, cx, cy, s.thick, s.cuff);
+    // Shirt cuff near the hand.
+    const mx = fx + (cx - fx) * 0.78;
+    const my = fy + (cy - fy) * 0.78;
+    cv.disc(mx, my, 17, WHITE);
+    cv.ring(mx, my, 17, 2, INK_SOFT);
   }
+  // The clasp itself: overlapping hand discs with finger arcs.
+  cv.disc(cx - 10, cy + 2, 19, [232, 190, 150]);
+  cv.disc(cx + 12, cy - 2, 19, [214, 168, 124]);
+  cv.disc(cx + 1, cy + 12, 17, [226, 182, 140]);
+  for (let f = 0; f < 4; f++) {
+    cv.line(cx - 20 + f * 9, cy - 12, cx - 14 + f * 9, cy + 8, 3, [170, 128, 92]);
+  }
+  cv.ring(cx, cy, 40, 2, INK_SOFT);
 }
 
-// Ticker band: the rest of the day in brief
-{
-  const y = 1876, h = 124;
-  rect(48, y, W - 96, h, INK);
-  drawTextC("JEFFRIES SET TO BE FIRST BLACK US SPEAKER + EU OFFERS 45BN EURO UKRAINE LOAN", W / 2, y + 14, 4, WHITE);
-  drawTextC("VAN GOGH SELLS FOR RECORD $190.4M + FINLAND OPENS FIRST NUCLEAR WASTE VAULT", W / 2, y + 50, 4, GOLD);
-  drawTextC("DRAWN BY A PROGRAM FROM THE DAY'S WIRE REPORTS - BANK INDONESIA RAISES RATE TO 6% - 19.11.2026", W / 2, y + 88, 3, [200, 195, 180]);
+// Spot icons, drawn inside a 64x64 box whose top-left corner is (x, y).
+function iconBridge(cv: Canvas, x: number, y: number): void {
+  cv.line(x + 4, y + 50, x + 60, y + 50, 5, NAVY); // deck
+  cv.line(x + 10, y + 50, x + 10, y + 18, 4, NAVY); // towers
+  cv.line(x + 54, y + 50, x + 54, y + 18, 4, NAVY);
+  cv.line(x + 10, y + 20, x + 32, y + 46, 2, INK_SOFT); // cables
+  cv.line(x + 54, y + 20, x + 32, y + 46, 2, INK_SOFT);
+  cv.rect(x + 26, y + 44, 12, 10, PAPER); // the broken span
+  cv.burst(x + 32, y + 16, 13, 5, RED); // explosion
+  cv.burst(x + 46, y + 8, 8, 3, GOLD);
 }
 
-// ---------------- output ----------------
-const small = downsample2x(px, W, H);
-const png = encodePNG(small, 1024, 1024);
-const outDir = process.env.MAKEFUN_OUTPUT_DIR || "/output";
-mkdirSync(outDir, { recursive: true });
-writeFileSync(join(outDir, "entry.png"), png);
-console.log(`wrote ${join(outDir, "entry.png")} (${png.length} bytes)`);
+function iconGame(cv: Canvas, x: number, y: number): void {
+  cv.disc(x + 48, y + 16, 10, GOLD); // Vice City sun
+  cv.line(x + 32, y + 58, x + 32, y + 26, 5, [38, 110, 66]); // palm trunk
+  for (const [ex, ey] of [[14, 18], [24, 12], [40, 12], [50, 18], [20, 26], [44, 26]] as Array<[number, number]>) {
+    cv.line(x + 32, y + 26, x + ex, y + ey, 4, [38, 110, 66]);
+  }
+  cv.rect(x + 4, y + 52, 56, 4, NAVY); // shoreline
+  drawText(cv, x + 6, y + 34, "VI", 2, RED);
+}
+
+function iconProbe(cv: Canvas, x: number, y: number): void {
+  cv.rect(x, y, 64, 64, NAVY_DARK);
+  for (const [sx, sy] of [[8, 10], [52, 8], [58, 30], [14, 44], [44, 52], [26, 20]] as Array<[number, number]>) {
+    cv.disc(x + sx, y + sy, 1.8, WHITE);
+  }
+  cv.disc(x + 24, y + 34, 11, SKY); // the big dish
+  cv.line(x + 32, y + 38, x + 48, y + 48, 3, GOLD); // boom
+  cv.disc(x + 50, y + 50, 4, GOLD);
+  cv.line(x + 24, y + 34, x + 24, y + 52, 3, PAPER_SHADE); // mast
+}
+
+function iconScales(cv: Canvas, x: number, y: number): void {
+  cv.line(x + 32, y + 8, x + 32, y + 50, 4, NAVY); // post
+  cv.line(x + 10, y + 14, x + 54, y + 14, 4, NAVY); // beam
+  cv.disc(x + 32, y + 8, 4, GOLD);
+  for (const px of [12, 52]) {
+    cv.line(x + px - 2, y + 14, x + px, y + 32, 2, INK);
+    cv.line(x + px + 2, y + 14, x + px, y + 32, 2, INK);
+    cv.tri(x + px - 10, y + 32, x + px + 10, y + 32, x + px, y + 40, GOLD);
+  }
+  cv.rect(x + 18, y + 52, 28, 5, NAVY); // base
+}
+
+function iconCyclone(cv: Canvas, x: number, y: number): void {
+  // Spiral arms: concentric broken rings shrinking toward the eye.
+  for (let ringIdx = 0; ringIdx < 3; ringIdx++) {
+    const r = 26 - ringIdx * 8;
+    const start = ringIdx * 1.1;
+    for (let a = 0; a < Math.PI * 1.5; a += 0.12) {
+      const ang = start + a;
+      cv.disc(x + 32 + Math.cos(ang) * r, y + 30 + Math.sin(ang) * r, 3.4, NAVY);
+    }
+  }
+  cv.disc(x + 32, y + 30, 5, RED); // the eye
+  cv.line(x + 6, y + 58, x + 58, y + 58, 4, [38, 110, 66]); // coastline
+}
+
+// ---------------------------------------------------------------------------
+// Page composition: masthead, date band, hero story, secondary grid,
+// "also today" ticker. Coordinates are planned on a 1024x1024 sheet with
+// 48px side margins, so the text measure is 928px wide.
+// ---------------------------------------------------------------------------
+
+const MARGIN = 48;
+const MEASURE = W - MARGIN * 2; // 928
+
+function rule(cv: Canvas, y: number, colour: Rgb = INK, t = 2): void {
+  cv.rect(MARGIN, y, MEASURE, t, colour);
+}
+
+// One secondary story: spot icon in a tinted box, bold-ish headline, dek.
+function story(
+  cv: Canvas,
+  x: number,
+  y: number,
+  icon: (c: Canvas, ix: number, iy: number) => void,
+  headline: string,
+  dek: string,
+): void {
+  cv.rect(x, y, 60, 60, PAPER_SHADE);
+  cv.frame(x, y, 60, 60, 1, INK_SOFT);
+  icon(cv, x - 2, y - 2);
+  const tx = x + 72;
+  const tw = 452 - 72;
+  drawWrapped(cv, tx, y + 2, headline, 2, INK, tw, 18);
+  drawWrapped(cv, tx, y + 40, dek, 2, INK_SOFT, tw, 18);
+}
+
+function buildPage(): Canvas {
+  const cv = new Canvas();
+  cv.fillAll(PAPER);
+
+  // Double-rule page frame.
+  cv.frame(18, 18, W - 36, H - 36, 3, INK);
+  cv.frame(27, 27, W - 54, H - 54, 1, INK);
+
+  // Kicker line above the masthead.
+  drawTextCentred(cv, W / 2, 42, "ONE PAGE • THE WHOLE PLANET • ALL THE NEWS THAT FITS", 2, RED);
+  rule(cv, 66);
+
+  // Masthead.
+  drawTextCentred(cv, W / 2, 78, "THE WORLD IN ONE PICTURE", 6, INK);
+  rule(cv, 132, INK, 1);
+  drawText(cv, MARGIN, 142, "VOL. 1 - NO. 319", 2, INK_SOFT);
+  drawTextCentred(cv, W / 2, 142, "SHENZHEN SUMMIT EDITION", 2, INK_SOFT);
+  const price = "PRICE: ONE GLANCE";
+  drawText(cv, MARGIN + MEASURE - textWidth(price, 2), 142, price, 2, INK_SOFT);
+
+  // Date band — the day of the week must be unmissable.
+  cv.rect(MARGIN, 166, MEASURE, 58, NAVY_DARK);
+  cv.disc(MARGIN + 30, 195, 6, GOLD);
+  cv.disc(MARGIN + MEASURE - 30, 195, 6, GOLD);
+  drawTextCentred(cv, W / 2, 181, "THURSDAY, 19 NOVEMBER 2026", 4, WHITE);
+
+  // Hero headline.
+  drawTextCentred(cv, W / 2, 242, "TRUMP, XI AND PUTIN SHAKE HANDS", 5, INK);
+  drawTextCentred(cv, W / 2, 287, "AT THE APEC SUMMIT IN SHENZHEN", 5, RED);
+
+  // Hero panel: three flags over a three-way handshake.
+  cv.rect(MARGIN, 344, MEASURE, 288, PAPER_SHADE);
+  cv.frame(MARGIN, 344, MEASURE, 288, 2, INK);
+  const flagW = 272;
+  const flagH = 84;
+  const flagY = 356;
+  flagUsa(cv, 64, flagY, flagW, flagH);
+  flagChina(cv, 376, flagY, flagW, flagH);
+  flagRussia(cv, 688, flagY, flagW, flagH);
+  drawTextCentred(cv, 64 + flagW / 2, 448, "UNITED STATES", 2, INK);
+  drawTextCentred(cv, 376 + flagW / 2, 448, "CHINA", 2, INK);
+  drawTextCentred(cv, 688 + flagW / 2, 448, "RUSSIA", 2, INK);
+  handshake(cv, W / 2, 548);
+
+  drawTextCentred(
+    cv, W / 2, 644,
+    "THREE LEADERS, ONE TABLE: A HANDSHAKE THAT RESETS TRADE TALKS",
+    2, INK_SOFT,
+  );
+  rule(cv, 664);
+
+  // Secondary stories, two columns.
+  const colL = MARGIN;
+  const colR = 524;
+  story(cv, colL, 676, iconBridge, "CRIMEAN BRIDGE HIT AGAIN",
+    "EXPLOSIONS ROCK THE KERCH STRAIT CROSSING; TRAFFIC HALTED");
+  story(cv, colR, 676, iconGame, "GTA VI LAUNCHES WORLDWIDE",
+    "VICE CITY RETURNS AS FANS QUEUE OVERNIGHT FOR MIDNIGHT RELEASE");
+  story(cv, colL, 748, iconProbe, "VOYAGER 1 AT ONE LIGHT-DAY",
+    "THE 1977 PROBE IS NOW A FULL DAY OF LIGHT-TIME FROM EARTH");
+  story(cv, colR, 748, iconScales, "ICJ RULES ON ROHINGYA CASE",
+    "WORLD COURT HANDS DOWN JUDGMENT IN THE GENOCIDE CASE");
+  story(cv, colL, 820, iconCyclone, "CYCLONE AKVAN HITS INDIA",
+    "LANDFALL ON THE EAST COAST DRIVES FLOODS AND EVACUATIONS");
+
+  // Number-of-the-day box balancing the right column.
+  const bx = colR;
+  const by = 820;
+  cv.frame(bx, by, 452, 60, 2, GOLD);
+  drawText(cv, bx + 14, by + 8, "NUMBER OF THE DAY", 2, RED);
+  drawText(cv, bx + 14, by + 30, "25.9BN KM", 3, INK);
+  drawText(cv, bx + 190, by + 34, "= ONE LIGHT-DAY", 2, INK_SOFT);
+
+  // Bottom ticker: everything else that happened today.
+  const tickY = 896;
+  cv.rect(MARGIN, tickY, MEASURE, 88, NAVY_DARK);
+  drawText(cv, MARGIN + 16, tickY + 10, "ALSO TODAY", 2, GOLD);
+  const tickerLines = [
+    "JEFFRIES BECOMES FIRST BLACK US HOUSE SPEAKER",
+    "EU AGREES 45BN LOAN FOR UKRAINE • VAN GOGH SELLS FOR $190.4M",
+    "FINLAND SEALS FIRST NUCLEAR WASTE VAULT • BI HOLDS RATES AT 6%",
+  ];
+  tickerLines.forEach((line, i) => {
+    drawText(cv, MARGIN + 16, tickY + 32 + i * 18, line, 2, WHITE);
+  });
+
+  return cv;
+}
+
+// ---------------------------------------------------------------------------
+// Entry point: render once, encode, write. No clocks or randomness anywhere,
+// so repeated runs emit byte-identical PNG files.
+// ---------------------------------------------------------------------------
+
+function main(): void {
+  const cv = buildPage();
+  const png = encodePng(W, H, cv.px);
+  mkdirSync("/output", { recursive: true });
+  writeFileSync("/output/entry.png", png);
+  console.log(`entry.png written: ${png.length} bytes (${W}x${H})`);
+}
+
+main();
